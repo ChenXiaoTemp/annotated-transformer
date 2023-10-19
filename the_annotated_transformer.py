@@ -2029,7 +2029,7 @@ def visualize_layer(model, layer, getter_fn, ntokens, row_tokens, col_tokens):
 
 # %% [markdown]
 # ## Encoder Self Attention
-
+example_simple_model()
 # %% tags=[]
 def viz_encoder_self():
     model, example_data = run_model_example(n_examples=1)
