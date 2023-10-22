@@ -10,3 +10,4 @@ jupytext
 flake8
 black
 GPUtil
+matplotlib
