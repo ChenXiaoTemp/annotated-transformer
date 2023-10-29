@@ -1,4 +1,5 @@
 import os
+import shutil
 from os.path import exists
 import random
 
@@ -746,10 +747,36 @@ def data_gen_number(V, batch_size, nbatches):
         yield Batch(src, tgt, 0)
 
 
-def train_calculator_model():
+def save_model(model, path):
+    torch.save(model.state_dict(), path)
+
+
+def load_model(model, path):
+    if os.path.isfile(path):
+        model.load_state_dict(torch.load(path))
+    return model
+
+
+def calculate(folder="./models"):
+    V = voca_size
+    model = make_model(V, V, N=2)
+    os.makedirs(folder, exist_ok=True)
+    load_model(model, os.path.join(folder, "best.pt"))
+    model.eval()
+    src = generate_input_batch("100+101=")
+    max_len = src.shape[1] + 10
+    src_mask = torch.ones(1, 1, src.shape[1])
+    res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0)
+    print(from_tokens(res[0]))
+
+
+def train_calculator_model(folder="./models"):
     V = voca_size
     criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
     model = make_model(V, V, N=2)
+
+    os.makedirs(folder, exist_ok=True)
+    load_model(model, os.path.join(folder, "best.pt"))
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9
@@ -762,6 +789,8 @@ def train_calculator_model():
     )
 
     batch_size = 80
+    best_loss = 1000000
+    best_path = None
     for epoch in range(20):
         model.train()
         run_epoch(
@@ -773,7 +802,7 @@ def train_calculator_model():
             mode="train",
         )
         model.eval()
-        run_epoch(
+        loss = run_epoch(
             data_gen_number(V, batch_size, 5),
             model,
             SimpleLossCompute(model.generator, criterion),
@@ -781,7 +810,15 @@ def train_calculator_model():
             DummyScheduler(),
             mode="eval",
         )[0]
+        print(f"Evaluation loss ${loss}")
+        model_path = os.path.join(folder, f"{epoch}.pt")
+        save_model(model, model_path)
+        if loss < best_loss:
+            best_loss = loss
+            best_path = model_path
 
+    load_model(model, best_path)
+    shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
     model.eval()
     src = generate_input_batch("10000+1001")
     max_len = src.shape[1] + 10
@@ -792,4 +829,4 @@ def train_calculator_model():
 
 
 if __name__ == "__main__":
-    train_calculator_model()
+    calculate()
