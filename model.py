@@ -1,5 +1,7 @@
 import os
 from os.path import exists
+import random
+
 import torch
 import torch.nn as nn
 from torch.nn.functional import log_softmax, pad
@@ -10,6 +12,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import pandas as pd
 import altair as alt
 import matplotlib.pyplot as plt
+import sys
 
 from torchtext.data.functional import to_map_style_dataset
 from torch.utils.data import DataLoader
@@ -582,10 +585,10 @@ class SimpleLossCompute:
     def __call__(self, x, y, norm):
         x = self.generator(x)
         sloss = (
-            self.criterion(
-                x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1)
-            )
-            / norm
+                self.criterion(
+                    x.contiguous().view(-1, x.size(-1)), y.contiguous().view(-1)
+                )
+                / norm
         )
         return sloss.data * norm, sloss
 
@@ -621,6 +624,7 @@ class DummyOptimizer(torch.optim.Optimizer):
 class DummyScheduler:
     def step(self):
         None
+
 
 def example_simple_model():
     V = 11
@@ -665,6 +669,127 @@ def example_simple_model():
     print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))
 
 
+def get_tokenizer(path='/Users/shawn/Develop/WorkSpace/Models/Qwen-14B-Chat-Int8'):
+    sys.path.append(path)
+    from tokenization_qwen import QWenTokenizer, ENDOFTEXT
+    tokenizer = QWenTokenizer(os.path.join(path, 'qwen.tiktoken'), pad_token=ENDOFTEXT)
+    return tokenizer
+
+
+operators = ['^', '$', '+', '-', '=']  # start,end, plus, minus
+voca_size = len(operators) + ord('9') - ord('0') + 1
+operators_function = [None, None, lambda x, y: x + y, lambda x, y: x - y,None]
+
+
+def to_token(ch):
+    if ch in operators:
+        return operators.index(ch)
+    else:
+        return int(ord(ch) - ord('0')) + len(operators)
+
+
+def from_token(token):
+    if token < len(operators):
+        return operators[token]
+    else:
+        return chr(ord('0') + token - len(operators))
+
+
+def to_tokens(text):
+    res = []
+    for ch in text:
+        res.append(to_token(ch))
+    return res
+
+
+def from_tokens(tokens):
+    res = ""
+    for token in tokens:
+        if token < len(operators):
+            res += operators[token]
+        else:
+            res += chr(ord('0') + token - len(operators))
+    return res
+
+
+def padding_batch(batch):
+    length = max(list(map(len, batch)))
+    res = []
+    for item in batch:
+        item += [to_token('$')] * (length - len(item))
+        res.append([to_token('^')] + item + [to_token('$')])
+    return batch
+
+
+def generate_input_batch(text):
+    res = [to_token('^')]
+    res += to_tokens(text)
+    return torch.tensor([res])
+
+
+def data_gen_number(V, batch_size, nbatches):
+    "Generate random data for a src-tgt copy task."
+    for i in range(nbatches):
+        batch = []
+        for j in range(batch_size):
+            left1 = random.randint(-1000, 1000)
+            left2 = random.randint(-1000, 1000)
+            operator = random.randint(2, 3)
+            target = operators_function[operator](left1, left2)
+            text = f"${left1}${operators[operator]}${left2}=${target}"
+            batch.append(to_tokens(text))
+
+        data = padding_batch(batch)
+        data = torch.tensor(data)
+        src = data.requires_grad_(False).clone().detach()
+        tgt = data.requires_grad_(False).clone().detach()
+        yield Batch(src, tgt, 0)
+
+
+def train_calculator_model():
+    V = voca_size
+    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+    model = make_model(V, V, N=2)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9
+    )
+    lr_scheduler = LambdaLR(
+        optimizer=optimizer,
+        lr_lambda=lambda step: rate(
+            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
+        ),
+    )
+
+    batch_size = 80
+    for epoch in range(20):
+        model.train()
+        run_epoch(
+            data_gen_number(V, batch_size, 20),
+            model,
+            SimpleLossCompute(model.generator, criterion),
+            optimizer,
+            lr_scheduler,
+            mode="train",
+        )
+        model.eval()
+        run_epoch(
+            data_gen_number(V, batch_size, 5),
+            model,
+            SimpleLossCompute(model.generator, criterion),
+            DummyOptimizer(),
+            DummyScheduler(),
+            mode="eval",
+        )[0]
+
+    model.eval()
+    src = generate_input_batch("10000+1001")
+    max_len = src.shape[1] + 10
+    src_mask = torch.ones(1, 1, src.shape[1])
+    res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0)
+    print(res)
+    print(from_tokens(res[0]))
+
 
 if __name__ == "__main__":
-    example_simple_model()
+    train_calculator_model()
