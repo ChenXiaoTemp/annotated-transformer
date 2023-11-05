@@ -399,7 +399,7 @@ def run_epoch(
             elapsed = time.time() - start
             print(
                 (
-                        "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.2f "
+                        "Epoch Step: %6d | Accumulation Step: %3d | Loss: %6.6f "
                         + "| Tokens / Sec: %7.1f | Learning Rate: %6.1e"
                 )
                 % (i, n_accum, loss / batch.ntokens, tokens / elapsed, lr)
@@ -433,7 +433,6 @@ def example_learning_schedule():
 
     dummy_model = torch.nn.Linear(1, 1)
     learning_rates = []
-
     # we have 3 examples in opts list.
     for idx, example in enumerate(opts):
         # run 20000 epoch for each example
@@ -791,7 +790,7 @@ def train_calculator_model(folder="./models"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for epoch in range(20):
+    for epoch in range(100):
         model.train()
         run_epoch(
             data_gen_number(V, batch_size, 20),
@@ -829,4 +828,4 @@ def train_calculator_model(folder="./models"):
 
 
 if __name__ == "__main__":
-    calculate()
+    train_calculator_model()
