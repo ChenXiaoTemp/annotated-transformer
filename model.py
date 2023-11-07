@@ -698,7 +698,8 @@ def from_token(token):
 def to_tokens(text):
     res = []
     for ch in text:
-        res.append(to_token(ch))
+        token = to_token(ch)
+        res.append(token)
     return res
 
 
@@ -731,18 +732,22 @@ def data_gen_number(V, batch_size, nbatches):
     "Generate random data for a src-tgt copy task."
     for i in range(nbatches):
         batch = []
+        tgt_batch = []
         for j in range(batch_size):
-            left1 = random.randint(-1000, 1000)
-            left2 = random.randint(-1000, 1000)
+            left1 = random.randint(0, 1000)
+            left2 = random.randint(0, 1000)
             operator = random.randint(2, 3)
             target = operators_function[operator](left1, left2)
-            text = f"${left1}${operators[operator]}${left2}=${target}"
+            text = f"{''.join(list(reversed(str(left1))))}{operators[operator]}{''.join(list(reversed(str(left2))))}="
             batch.append(to_tokens(text))
+            tgt_batch.append(to_tokens(f"{''.join(list(reversed(str(target))))}"))
 
         data = padding_batch(batch)
         data = torch.tensor(data)
+        tgt_data = padding_batch(tgt_batch)
+        tgt_data = torch.tensor(tgt_data)
         src = data.requires_grad_(False).clone().detach()
-        tgt = data.requires_grad_(False).clone().detach()
+        tgt = tgt_data.requires_grad_(False).clone().detach()
         yield Batch(src, tgt, 0)
 
 
@@ -790,7 +795,7 @@ def train_calculator_model(folder="./models"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for epoch in range(100):
+    for epoch in range(500):
         model.train()
         run_epoch(
             data_gen_number(V, batch_size, 20),
@@ -828,4 +833,4 @@ def train_calculator_model(folder="./models"):
 
 
 if __name__ == "__main__":
-    train_calculator_model()
+    train_calculator_model("models2")
