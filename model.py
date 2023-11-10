@@ -27,6 +27,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+#device="cpu"
 
 def clones(module, N):
     "Produce N identical layers."
@@ -218,8 +220,8 @@ class MultiHeadedAttention(nn.Module):
         # 3) "Concat" using a view and apply a final linear.
         x = (
             x.transpose(1, 2)
-                .contiguous()
-                .view(nbatches, -1, self.h * self.d_k)
+            .contiguous()
+            .view(nbatches, -1, self.h * self.d_k)
         )
         del query
         del key
@@ -329,6 +331,8 @@ class Batch:
     """Object for holding a batch of data with mask during training."""
 
     def __init__(self, src, tgt=None, pad=2):  # 2 = <blank>
+        src = src.to(device=device)
+        tgt = tgt.to(device=device)
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if tgt is not None:
@@ -472,10 +476,10 @@ def example_learning_schedule():
 
     return (
         alt.Chart(opts_data)
-            .mark_line()
-            .properties(width=600)
-            .encode(x="step", y="Learning Rate", color="model_size:warmup:N")
-            .interactive()
+        .mark_line()
+        .properties(width=600)
+        .encode(x="step", y="Learning Rate", color="model_size:warmup:N")
+        .interactive()
     )
 
 
@@ -532,16 +536,16 @@ def example_label_smoothing():
 
     return (
         alt.Chart(LS_data)
-            .mark_rect(color="Blue", opacity=1)
-            .properties(height=200, width=200)
-            .encode(
+        .mark_rect(color="Blue", opacity=1)
+        .properties(height=200, width=200)
+        .encode(
             alt.X("columns:O", title=None),
             alt.Y("rows:O", title=None),
             alt.Color(
                 "target distribution:Q", scale=alt.Scale(scheme="viridis")
             ),
         )
-            .interactive()
+        .interactive()
     )
 
 
@@ -677,22 +681,30 @@ def get_tokenizer(path='/Users/shawn/Develop/WorkSpace/Models/Qwen-14B-Chat-Int8
 
 
 operators = ['^', '$', '+', '-', '=']  # start,end, plus, minus
-voca_size = len(operators) + ord('9') - ord('0') + 1
-operators_function = [None, None, lambda x, y: x + y, lambda x, y: x - y,None]
+voca_size = len(operators) + ord('9') - ord('0') + 1 + ord('J')-ord('A')+1
+operators_function = [None, None, lambda x, y: x + y, lambda x, y: x - y, None]
 
 
 def to_token(ch):
     if ch in operators:
         return operators.index(ch)
     else:
-        return int(ord(ch) - ord('0')) + len(operators)
+        if ord(ch)>ord('9'):
+            res=int(ord(ch) - ord('A')+10) + len(operators)
+        else:
+            res=int(ord(ch) - ord('0')) + len(operators)
+        assert res<voca_size
+        return res
 
 
 def from_token(token):
     if token < len(operators):
         return operators[token]
     else:
-        return chr(ord('0') + token - len(operators))
+        tmp=ord('0') + token - len(operators)
+        if tmp>to_token('9'):
+            return chr(tmp-to_token('9')+ord('A'))
+        return chr(tmp)
 
 
 def to_tokens(text):
@@ -719,7 +731,7 @@ def padding_batch(batch):
     for item in batch:
         item += [to_token('$')] * (length - len(item))
         res.append([to_token('^')] + item + [to_token('$')])
-    return batch
+    return res
 
 
 def generate_input_batch(text):
@@ -728,7 +740,46 @@ def generate_input_batch(text):
     return torch.tensor([res])
 
 
-def data_gen_number(V, batch_size, nbatches):
+def generate_one_pair(left1, left2, operator):
+    if isinstance(operator, str):
+        operator_index = operators.index(operator)
+    else:
+        operator_index = operator
+        operator = operators[operator_index]
+    target = operators_function[operator_index](left1, left2)
+    text = f"{''.join(list(reversed(str(left1))))}{operator}{''.join(list(reversed(str(left2))))}="
+    target_text = f"{''.join(list(reversed(str(target))))}"
+    return text, target_text
+
+def padding_str(text, length, position='left'):
+    if position=='left':
+        if length>len(text):
+            text = '0'*(length-len(text))+text
+    elif position=='right':
+        if length>len(text):
+            text = text+'0'*(length-len(text))
+    return text
+
+def sum_two_str(str1,str2):
+    length=max(len(str1),len(str2))
+    text1=padding_str(str1, length)
+    text2=padding_str(str2, length)
+    res=''
+    for ch1,ch2 in zip(text1,text2):
+        ch=(ord(ch1)-ord('0'))+(ord(ch2)-ord('0'))+ord('0')
+        if ch>ord('9'):
+            ch=ch-ord('9')+ord('A')
+        res+=chr(ch)
+    return text1,text2,res
+
+def generate_one_pair1(left1, left2):
+    left1=str(left1)
+    left2=str(left2)
+    text1,text2, target = sum_two_str(left1,left2)
+    text = f"{text1}+{text2}="
+    return text, target
+
+def data_gen_number(batch_size, nbatches):
     "Generate random data for a src-tgt copy task."
     for i in range(nbatches):
         batch = []
@@ -736,11 +787,9 @@ def data_gen_number(V, batch_size, nbatches):
         for j in range(batch_size):
             left1 = random.randint(0, 1000)
             left2 = random.randint(0, 1000)
-            operator = random.randint(2, 3)
-            target = operators_function[operator](left1, left2)
-            text = f"{''.join(list(reversed(str(left1))))}{operators[operator]}{''.join(list(reversed(str(left2))))}="
+            text, target = generate_one_pair1(left1, left2)
             batch.append(to_tokens(text))
-            tgt_batch.append(to_tokens(f"{''.join(list(reversed(str(target))))}"))
+            tgt_batch.append(to_tokens(target))
 
         data = padding_batch(batch)
         data = torch.tensor(data)
@@ -774,10 +823,60 @@ def calculate(folder="./models"):
     print(from_tokens(res[0]))
 
 
+def generate_dataset(folder="./dataset"):
+    file1 = os.path.join(folder, "plus.txt")
+    lines = []
+    for i in range(0, 1000):
+        for j in range(0, 1000):
+            text, target = generate_one_pair1(i, j)
+            lines.append(f"{text}{target}")
+    with open(file1, "w") as f:
+        f.writelines([line + "\n" for line in lines])
+
+
+def dataset_range(start, end, batch_size):
+    src_batch = []
+    tgt_batch = []
+    for i in range(start, end):
+        for j in range(start, end):
+            text, target = generate_one_pair1(i, j)
+            src_batch.append(to_tokens(text))
+            tgt_batch.append(to_tokens(target))
+            if len(src_batch) == batch_size:
+                data = padding_batch(src_batch)
+                data = torch.tensor(data)
+                tgt_data = padding_batch(tgt_batch)
+                tgt_data = torch.tensor(tgt_data)
+                src = data.requires_grad_(False).clone().detach()
+                tgt = tgt_data.requires_grad_(False).clone().detach()
+                yield Batch(src, tgt, 0)
+                src_batch = []
+                tgt_batch = []
+
+
+def evaluate_dataset(model, start, end, output_files):
+    model.eval()
+    lines = []
+    for i in range(start, end):
+        for j in range(start, end):
+            text, target = generate_one_pair(i, j, "+")
+            src = generate_input_batch(text)
+            max_len = src.shape[1] + 10
+            src_mask = torch.ones(1, 1, src.shape[1])
+            res = greedy_decode(model, src.to(device=device), src_mask.to(device=device), max_len=max_len,
+                                start_symbol=0)
+            res_text = from_tokens(res[0])
+            lines.append(f"{text}{target}")
+            lines.append(f"{res_text}")
+    with open(output_files, 'w') as f:
+        f.writelines([line + "\n" for line in lines])
+
+
 def train_calculator_model(folder="./models"):
     V = voca_size
     criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
     model = make_model(V, V, N=2)
+    model.to(device=device)
 
     os.makedirs(folder, exist_ok=True)
     load_model(model, os.path.join(folder, "best.pt"))
@@ -795,10 +894,11 @@ def train_calculator_model(folder="./models"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for epoch in range(500):
+    for epoch in range(1000):
+        print(f"Epoch {epoch}")
         model.train()
         run_epoch(
-            data_gen_number(V, batch_size, 20),
+            dataset_range(0, batch_size, 20),
             model,
             SimpleLossCompute(model.generator, criterion),
             optimizer,
@@ -806,20 +906,24 @@ def train_calculator_model(folder="./models"):
             mode="train",
         )
         model.eval()
+        print(f"Start evaluation {epoch}")
         loss = run_epoch(
-            data_gen_number(V, batch_size, 5),
+            data_gen_number(batch_size, 20),
             model,
             SimpleLossCompute(model.generator, criterion),
             DummyOptimizer(),
             DummyScheduler(),
             mode="eval",
         )[0]
-        print(f"Evaluation loss ${loss}")
+        print(f"Epoch {epoch}'s evaluation loss ${loss}")
         model_path = os.path.join(folder, f"{epoch}.pt")
         save_model(model, model_path)
         if loss < best_loss:
             best_loss = loss
             best_path = model_path
+        #filepath = os.path.join("res", f"{epoch}.txt")
+        #print(f"Epoch {epoch} start write evaluation result to {filepath}")
+        #evaluate_dataset(model, 90, 100, filepath)
 
     load_model(model, best_path)
     shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
@@ -833,4 +937,6 @@ def train_calculator_model(folder="./models"):
 
 
 if __name__ == "__main__":
-    train_calculator_model("models2")
+    #print(sum_two_str('123456789','1234567890'))
+    #generate_dataset()
+    train_calculator_model("models3")
