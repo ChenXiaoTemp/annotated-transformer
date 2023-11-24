@@ -28,7 +28,52 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-#device="cpu"
+
+operators = ['~', '^', '$', '+', '-', '=']  # blank, start,end, plus, minus
+start_symbol = 1
+pad_symbol = 0
+voca_size = len(operators) + ord('9') - ord('0') + 1 + ord('J') - ord('A') + 1
+operators_function = [None, None, lambda x, y: x + y, lambda x, y: x - y, None]
+
+
+def to_token(ch):
+    if ch in operators:
+        return operators.index(ch)
+    else:
+        if ord(ch) > ord('9'):
+            res = int(ord(ch) - ord('A') + 10) + len(operators)
+        else:
+            res = int(ord(ch) - ord('0')) + len(operators)
+        assert res < voca_size
+        return res
+
+
+def from_token(token):
+    if token < len(operators):
+        return operators[token]
+    else:
+        tmp = ord('0') + token - len(operators)
+        if tmp > ord('9'):
+            return chr(tmp - to_token('9') + ord('A'))
+        return chr(tmp)
+
+
+def to_tokens(text):
+    res = []
+    for ch in text:
+        token = to_token(ch)
+        res.append(token)
+    return res
+
+
+def from_tokens(tokens):
+    res = ""
+    for token in tokens:
+        res += from_token(token)
+    return res
+
+
+# device="cpu"
 
 def clones(module, N):
     "Produce N identical layers."
@@ -330,12 +375,12 @@ def run_tests():
 class Batch:
     """Object for holding a batch of data with mask during training."""
 
-    def __init__(self, src, tgt=None, pad=2):  # 2 = <blank>
+    def __init__(self, src, tgt=None, pad=pad_symbol):  # 0 = <blank>
         src = src.to(device=device)
-        tgt = tgt.to(device=device)
         self.src = src
         self.src_mask = (src != pad).unsqueeze(-2)
         if tgt is not None:
+            tgt = tgt.to(device=device)
             self.tgt = tgt[:, :-1]
             self.tgt_y = tgt[:, 1:]
             self.tgt_mask = self.make_std_mask(self.tgt, pad)
@@ -597,16 +642,22 @@ class SimpleLossCompute:
         return sloss.data * norm, sloss
 
 
-def greedy_decode(model, src, src_mask, max_len, start_symbol):
+def greedy_decode(model, src, src_mask, max_len, start_symbol, pad=pad_symbol):
     memory = model.encode(src, src_mask)
     ys = torch.zeros(1, 1).fill_(start_symbol).type_as(src.data)
     for i in range(max_len - 1):
-        out = model.decode(
-            memory, src_mask, ys, subsequent_mask(ys.size(1)).type_as(src.data)
+        ys_mask = (ys != pad)
+        ys_mask = ys_mask & subsequent_mask(ys.size(-1)).type_as(
+            ys_mask.data
         )
-        prob = model.generator(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
+        out = model.decode(
+            memory, src_mask, ys, ys_mask
+        )
+        prob = model.generator(out)
+        _, next_word = torch.max(prob[:, -1], dim=1)
         next_word = next_word.data[0]
+        if i == 0:
+            next_word = 7
         ys = torch.cat(
             [ys, torch.zeros(1, 1).type_as(src.data).fill_(next_word)], dim=1
         )
@@ -673,70 +724,17 @@ def example_simple_model():
     print(greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0))
 
 
-def get_tokenizer(path='/Users/shawn/Develop/WorkSpace/Models/Qwen-14B-Chat-Int8'):
-    sys.path.append(path)
-    from tokenization_qwen import QWenTokenizer, ENDOFTEXT
-    tokenizer = QWenTokenizer(os.path.join(path, 'qwen.tiktoken'), pad_token=ENDOFTEXT)
-    return tokenizer
-
-
-operators = ['^', '$', '+', '-', '=']  # start,end, plus, minus
-voca_size = len(operators) + ord('9') - ord('0') + 1 + ord('J')-ord('A')+1
-operators_function = [None, None, lambda x, y: x + y, lambda x, y: x - y, None]
-
-
-def to_token(ch):
-    if ch in operators:
-        return operators.index(ch)
-    else:
-        if ord(ch)>ord('9'):
-            res=int(ord(ch) - ord('A')+10) + len(operators)
-        else:
-            res=int(ord(ch) - ord('0')) + len(operators)
-        assert res<voca_size
-        return res
-
-
-def from_token(token):
-    if token < len(operators):
-        return operators[token]
-    else:
-        tmp=ord('0') + token - len(operators)
-        if tmp>to_token('9'):
-            return chr(tmp-to_token('9')+ord('A'))
-        return chr(tmp)
-
-
-def to_tokens(text):
-    res = []
-    for ch in text:
-        token = to_token(ch)
-        res.append(token)
-    return res
-
-
-def from_tokens(tokens):
-    res = ""
-    for token in tokens:
-        if token < len(operators):
-            res += operators[token]
-        else:
-            res += chr(ord('0') + token - len(operators))
-    return res
-
-
 def padding_batch(batch):
     length = max(list(map(len, batch)))
     res = []
     for item in batch:
-        item += [to_token('$')] * (length - len(item))
-        res.append([to_token('^')] + item + [to_token('$')])
+        res.append([to_token('^')] + item + [to_token('$')] + [pad_symbol] * (length - len(item)))
     return res
 
 
-def generate_input_batch(text):
+def generate_input_batch(text, padding=""):
     res = [to_token('^')]
-    res += to_tokens(text)
+    res += to_tokens(text) + [to_token('$')] + [pad_symbol for ch in padding]
     return torch.tensor([res])
 
 
@@ -751,33 +749,37 @@ def generate_one_pair(left1, left2, operator):
     target_text = f"{''.join(list(reversed(str(target))))}"
     return text, target_text
 
+
 def padding_str(text, length, position='left'):
-    if position=='left':
-        if length>len(text):
-            text = '0'*(length-len(text))+text
-    elif position=='right':
-        if length>len(text):
-            text = text+'0'*(length-len(text))
+    if position == 'left':
+        if length > len(text):
+            text = '0' * (length - len(text)) + text
+    elif position == 'right':
+        if length > len(text):
+            text = text + '0' * (length - len(text))
     return text
 
-def sum_two_str(str1,str2):
-    length=max(len(str1),len(str2))
-    text1=padding_str(str1, length)
-    text2=padding_str(str2, length)
-    res=''
-    for ch1,ch2 in zip(text1,text2):
-        ch=(ord(ch1)-ord('0'))+(ord(ch2)-ord('0'))+ord('0')
-        if ch>ord('9'):
-            ch=ch-ord('9')+ord('A')
-        res+=chr(ch)
-    return text1,text2,res
+
+def sum_two_str(str1, str2):
+    length = max(len(str1), len(str2))
+    text1 = padding_str(str1, length)
+    text2 = padding_str(str2, length)
+    res = ''
+    for ch1, ch2 in zip(text1, text2):
+        ch = (ord(ch1) - ord('0')) + (ord(ch2) - ord('0')) + ord('0')
+        if ch > ord('9'):
+            ch = ch - ord('9') + ord('A')
+        res += chr(ch)
+    return text1, text2, res
+
 
 def generate_one_pair1(left1, left2):
-    left1=str(left1)
-    left2=str(left2)
-    text1,text2, target = sum_two_str(left1,left2)
+    left1 = str(left1)
+    left2 = str(left2)
+    text1, text2, target = sum_two_str(left1, left2)
     text = f"{text1}+{text2}="
     return text, target
+
 
 def data_gen_number(batch_size, nbatches):
     "Generate random data for a src-tgt copy task."
@@ -797,7 +799,7 @@ def data_gen_number(batch_size, nbatches):
         tgt_data = torch.tensor(tgt_data)
         src = data.requires_grad_(False).clone().detach()
         tgt = tgt_data.requires_grad_(False).clone().detach()
-        yield Batch(src, tgt, 0)
+        yield Batch(src, tgt, pad_symbol)
 
 
 def save_model(model, path):
@@ -819,7 +821,7 @@ def calculate(folder="./models"):
     src = generate_input_batch("100+101=")
     max_len = src.shape[1] + 10
     src_mask = torch.ones(1, 1, src.shape[1])
-    res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0)
+    res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=start_symbol)
     print(from_tokens(res[0]))
 
 
@@ -834,11 +836,13 @@ def generate_dataset(folder="./dataset"):
         f.writelines([line + "\n" for line in lines])
 
 
-def dataset_range(start, end, batch_size):
+def dataset_range(start, end, batch_size, sample=0.0):
     src_batch = []
     tgt_batch = []
     for i in range(start, end):
         for j in range(start, end):
+            if random.random() < sample:
+                continue
             text, target = generate_one_pair1(i, j)
             src_batch.append(to_tokens(text))
             tgt_batch.append(to_tokens(target))
@@ -872,14 +876,33 @@ def evaluate_dataset(model, start, end, output_files):
         f.writelines([line + "\n" for line in lines])
 
 
-def train_calculator_model(folder="./models"):
+def evaluate(x, y, folder="./models3"):
     V = voca_size
     criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
     model = make_model(V, V, N=2)
     model.to(device=device)
 
     os.makedirs(folder, exist_ok=True)
-    load_model(model, os.path.join(folder, "best.pt"))
+    load_model(model, os.path.join(folder, "999.pt"))
+    model.eval()
+    text, target = generate_one_pair1(x, y)
+    src = generate_input_batch(text, "$$")
+    tgt = generate_input_batch(target)
+    max_len = src.shape[1] + 10
+    src = src.to(device=device)
+    src_mask = src != 0
+    res = greedy_decode(model, src, src_mask.to(device=device), max_len=max_len, start_symbol=start_symbol)
+    print(text + ":" + target + "=" + from_tokens(res[0]))
+
+
+def train_calculator_model(folder="./models4"):
+    V = voca_size
+    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+    model = make_model(V, V, N=2)
+    model.to(device=device)
+
+    os.makedirs(folder, exist_ok=True)
+    load_model(model, os.path.join(folder, "1086.pt"))
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9
@@ -894,11 +917,11 @@ def train_calculator_model(folder="./models"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for epoch in range(1000):
+    for epoch in range(0, 1000):
         print(f"Epoch {epoch}")
         model.train()
         run_epoch(
-            dataset_range(0, batch_size, 20),
+            dataset_range(1, 100, batch_size),
             model,
             SimpleLossCompute(model.generator, criterion),
             optimizer,
@@ -908,7 +931,7 @@ def train_calculator_model(folder="./models"):
         model.eval()
         print(f"Start evaluation {epoch}")
         loss = run_epoch(
-            data_gen_number(batch_size, 20),
+            dataset_range(1, 100, batch_size,0.8),
             model,
             SimpleLossCompute(model.generator, criterion),
             DummyOptimizer(),
@@ -921,9 +944,9 @@ def train_calculator_model(folder="./models"):
         if loss < best_loss:
             best_loss = loss
             best_path = model_path
-        #filepath = os.path.join("res", f"{epoch}.txt")
-        #print(f"Epoch {epoch} start write evaluation result to {filepath}")
-        #evaluate_dataset(model, 90, 100, filepath)
+        # filepath = os.path.join("res", f"{epoch}.txt")
+        # print(f"Epoch {epoch} start write evaluation result to {filepath}")
+        # evaluate_dataset(model, 90, 100, filepath)
 
     load_model(model, best_path)
     shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
@@ -937,6 +960,12 @@ def train_calculator_model(folder="./models"):
 
 
 if __name__ == "__main__":
-    #print(sum_two_str('123456789','1234567890'))
-    #generate_dataset()
-    train_calculator_model("models3")
+    # print(sum_two_str('123456789','1234567890'))
+    # generate_dataset()
+    train_calculator_model("models4")
+
+    start = 1
+    end = 100
+    for i in range(start, end):
+        for j in range(start, end):
+            evaluate(i, j)
