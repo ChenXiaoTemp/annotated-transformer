@@ -51,11 +51,10 @@ def to_token(ch):
 def from_token(token):
     if token < len(operators):
         return operators[token]
+    elif token > to_token('9'):
+        return chr(token - to_token('9') + ord('A') - 1)
     else:
-        tmp = ord('0') + token - len(operators)
-        if tmp > ord('9'):
-            return chr(tmp - to_token('9') + ord('A'))
-        return chr(tmp)
+        return chr(ord('0') + token - len(operators))
 
 
 def to_tokens(text):
@@ -656,8 +655,6 @@ def greedy_decode(model, src, src_mask, max_len, start_symbol, pad=pad_symbol):
         prob = model.generator(out)
         _, next_word = torch.max(prob[:, -1], dim=1)
         next_word = next_word.data[0]
-        if i == 0:
-            next_word = 7
         ys = torch.cat(
             [ys, torch.zeros(1, 1).type_as(src.data).fill_(next_word)], dim=1
         )
@@ -876,9 +873,8 @@ def evaluate_dataset(model, start, end, output_files):
         f.writelines([line + "\n" for line in lines])
 
 
-def evaluate(x, y, folder="./models3"):
+def evaluate(x, y, folder="./models4"):
     V = voca_size
-    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
     model = make_model(V, V, N=2)
     model.to(device=device)
 
@@ -890,7 +886,7 @@ def evaluate(x, y, folder="./models3"):
     tgt = generate_input_batch(target)
     max_len = src.shape[1] + 10
     src = src.to(device=device)
-    src_mask = src != 0
+    src_mask = src != pad_symbol
     res = greedy_decode(model, src, src_mask.to(device=device), max_len=max_len, start_symbol=start_symbol)
     print(text + ":" + target + "=" + from_tokens(res[0]))
 
@@ -902,7 +898,7 @@ def train_calculator_model(folder="./models4"):
     model.to(device=device)
 
     os.makedirs(folder, exist_ok=True)
-    load_model(model, os.path.join(folder, "1086.pt"))
+    load_model(model, os.path.join(folder, "999.pt"))
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9
@@ -917,7 +913,7 @@ def train_calculator_model(folder="./models4"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for epoch in range(0, 1000):
+    for epoch in range(359, 1000):
         print(f"Epoch {epoch}")
         model.train()
         run_epoch(
@@ -931,7 +927,7 @@ def train_calculator_model(folder="./models4"):
         model.eval()
         print(f"Start evaluation {epoch}")
         loss = run_epoch(
-            dataset_range(1, 100, batch_size,0.8),
+            dataset_range(1, 100, batch_size, 0.8),
             model,
             SimpleLossCompute(model.generator, criterion),
             DummyOptimizer(),
@@ -951,9 +947,9 @@ def train_calculator_model(folder="./models4"):
     load_model(model, best_path)
     shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
     model.eval()
-    src = generate_input_batch("10000+1001")
+    src = generate_input_batch("10000+1001").to(device=device)
     max_len = src.shape[1] + 10
-    src_mask = torch.ones(1, 1, src.shape[1])
+    src_mask = torch.ones(1, 1, src.shape[1]).to(device=device)
     res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0)
     print(res)
     print(from_tokens(res[0]))
@@ -962,10 +958,10 @@ def train_calculator_model(folder="./models4"):
 if __name__ == "__main__":
     # print(sum_two_str('123456789','1234567890'))
     # generate_dataset()
-    train_calculator_model("models4")
+    # train_calculator_model("models4")
 
-    start = 1
-    end = 100
+    start = 1000
+    end = 1010
     for i in range(start, end):
         for j in range(start, end):
             evaluate(i, j)
