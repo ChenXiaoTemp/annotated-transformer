@@ -833,11 +833,21 @@ def generate_dataset(folder="./dataset"):
         f.writelines([line + "\n" for line in lines])
 
 
-def dataset_range(start, end, batch_size, sample=0.0):
+def dataset_range(start, end, batch_size, sample=0.0, count=None):
     src_batch = []
     tgt_batch = []
-    for i in range(start, end):
-        for j in range(start, end):
+    x_items = []
+    y_items = []
+    if count is not None:
+        for _ in range(0, count):
+            x_items.append(random.randrange(start, end))
+        for _ in range(0, count):
+            y_items.append(random.randrange(start, end))
+    else:
+        x_items = range(start, end)
+        y_items = range(start, end)
+    for i in x_items:
+        for j in y_items:
             if random.random() < sample:
                 continue
             text, target = generate_one_pair1(i, j)
@@ -955,10 +965,75 @@ def train_calculator_model(folder="./models4"):
     print(from_tokens(res[0]))
 
 
+def meta_learn_train_calculator_model(folder="./models4"):
+    V = voca_size
+    criterion = LabelSmoothing(size=V, padding_idx=0, smoothing=0.0)
+    model = make_model(V, V, N=2)
+    model.to(device=device)
+
+    os.makedirs(folder, exist_ok=True)
+    load_model(model, os.path.join(folder, "999.pt"))
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=0.5, betas=(0.9, 0.98), eps=1e-9
+    )
+    lr_scheduler = LambdaLR(
+        optimizer=optimizer,
+        lr_lambda=lambda step: rate(
+            step, model_size=model.src_embed[0].d_model, factor=1.0, warmup=400
+        ),
+    )
+
+    batch_size = 80
+    best_loss = 1000000
+    best_path = None
+    for query_epoch in range(1, 10):
+        for support_epoch in range(1, 100):
+            print(f"Epoch {support_epoch}")
+            model.train()
+            run_epoch(
+                dataset_range(10**(query_epoch-1), 10**query_epoch, batch_size, count=50),
+                model,
+                SimpleLossCompute(model.generator, criterion),
+                optimizer,
+                lr_scheduler,
+                mode="train",
+            )
+            model.eval()
+            print(f"Start evaluation {query_epoch}/{support_epoch}")
+            loss = run_epoch(
+                dataset_range(1, 100, batch_size, 0.8),
+                model,
+                SimpleLossCompute(model.generator, criterion),
+                DummyOptimizer(),
+                DummyScheduler(),
+                mode="eval",
+            )[0]
+            print(f"Epoch {query_epoch}/{support_epoch}'s evaluation loss ${loss}")
+            model_path = os.path.join(folder, f"{query_epoch}-{support_epoch}.pt")
+            save_model(model, model_path)
+            if loss < best_loss:
+                best_loss = loss
+                best_path = model_path
+            # filepath = os.path.join("res", f"{epoch}.txt")
+            # print(f"Epoch {epoch} start write evaluation result to {filepath}")
+            # evaluate_dataset(model, 90, 100, filepath)
+
+    load_model(model, best_path)
+    shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
+    model.eval()
+    src = generate_input_batch("10000+1001").to(device=device)
+    max_len = src.shape[1] + 10
+    src_mask = torch.ones(1, 1, src.shape[1]).to(device=device)
+    res = greedy_decode(model, src, src_mask, max_len=max_len, start_symbol=0)
+    print(res)
+    print(from_tokens(res[0]))
+
+
 if __name__ == "__main__":
     # print(sum_two_str('123456789','1234567890'))
     # generate_dataset()
-    # train_calculator_model("models4")
+    meta_learn_train_calculator_model("models4")
 
     start = 1000
     end = 1010
