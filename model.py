@@ -1000,7 +1000,7 @@ def meta_learn_train_calculator_model(folder="./models4"):
             print(f"Supported Epoch {epoch}/{support_epoch}")
             model.train()
             run_epoch(
-                dataset_range(0, 10 ** epoch, batch_size, x_items=support_epoch, y_items=support_y_range),
+                dataset_range(0, 10 ** epoch, batch_size, x_items=support_x_range, y_items=support_y_range),
                 model,
                 SimpleLossCompute(model.generator, criterion),
                 optimizer,
@@ -1010,7 +1010,7 @@ def meta_learn_train_calculator_model(folder="./models4"):
             model.eval()
             print(f"Start support epoch evaluation {epoch}/{support_epoch}")
             loss = run_epoch(
-                dataset_range(1, 100, batch_size, 0.8, x_items=support_epoch, y_items=support_y_range),
+                dataset_range(1, 100, batch_size, 0.8, x_items=support_x_range, y_items=support_y_range),
                 model,
                 SimpleLossCompute(model.generator, criterion),
                 DummyOptimizer(),
