@@ -833,19 +833,24 @@ def generate_dataset(folder="./dataset"):
         f.writelines([line + "\n" for line in lines])
 
 
-def dataset_range(start, end, batch_size, sample=0.0, count=None):
-    src_batch = []
-    tgt_batch = []
+def items_range_generate(start, end, count=None):
     x_items = []
-    y_items = []
     if count is not None:
         for _ in range(0, count):
             x_items.append(random.randrange(start, end))
-        for _ in range(0, count):
-            y_items.append(random.randrange(start, end))
     else:
         x_items = range(start, end)
-        y_items = range(start, end)
+    return x_items
+
+
+def dataset_range(start, end, batch_size, sample=0.0, count=None, x_items=None, y_items=None):
+    src_batch = []
+    tgt_batch = []
+    if x_items is None:
+        x_items = items_range_generate(start, end, count)
+    if y_items is None:
+        y_items = items_range_generate(start, end, count)
+
     for i in x_items:
         for j in y_items:
             if random.random() < sample:
@@ -987,12 +992,15 @@ def meta_learn_train_calculator_model(folder="./models4"):
     batch_size = 80
     best_loss = 1000000
     best_path = None
-    for query_epoch in range(1, 10):
+    for epoch in range(1, 10):
+        support_x_range = items_range_generate(0, 10 ** epoch, count=200)
+        support_y_range = items_range_generate(0, 10 ** epoch, count=200)
+        print(f"Start epoch {epoch}")
         for support_epoch in range(1, 100):
-            print(f"Epoch {support_epoch}")
+            print(f"Supported Epoch {epoch}/{support_epoch}")
             model.train()
             run_epoch(
-                dataset_range(10**(query_epoch-1), 10**query_epoch, batch_size, count=50),
+                dataset_range(0, 10 ** epoch, batch_size, x_items=support_epoch, y_items=support_y_range),
                 model,
                 SimpleLossCompute(model.generator, criterion),
                 optimizer,
@@ -1000,24 +1008,50 @@ def meta_learn_train_calculator_model(folder="./models4"):
                 mode="train",
             )
             model.eval()
-            print(f"Start evaluation {query_epoch}/{support_epoch}")
+            print(f"Start support epoch evaluation {epoch}/{support_epoch}")
             loss = run_epoch(
-                dataset_range(1, 100, batch_size, 0.8),
+                dataset_range(1, 100, batch_size, 0.8, x_items=support_epoch, y_items=support_y_range),
                 model,
                 SimpleLossCompute(model.generator, criterion),
                 DummyOptimizer(),
                 DummyScheduler(),
                 mode="eval",
             )[0]
-            print(f"Epoch {query_epoch}/{support_epoch}'s evaluation loss ${loss}")
-            model_path = os.path.join(folder, f"{query_epoch}-{support_epoch}.pt")
+            print(f"support epoch {epoch}/{support_epoch}'s evaluation loss ${loss}")
+            model_path = os.path.join(folder, f"{epoch}-{support_epoch}-support.pt")
             save_model(model, model_path)
             if loss < best_loss:
                 best_loss = loss
                 best_path = model_path
-            # filepath = os.path.join("res", f"{epoch}.txt")
-            # print(f"Epoch {epoch} start write evaluation result to {filepath}")
-            # evaluate_dataset(model, 90, 100, filepath)
+        query_x_range = items_range_generate(0, 10 ** epoch, count=200)
+        query_y_range = items_range_generate(0, 10 ** epoch, count=200)
+        for query_epoch in range(1, 100):
+            print(f"Query Epoch {epoch}/{query_epoch}")
+            model.train()
+            run_epoch(
+                dataset_range(10 ** (epoch - 1), 10 ** epoch, batch_size, count=50, x_items=query_x_range, y_items=query_y_range),
+                model,
+                SimpleLossCompute(model.generator, criterion),
+                optimizer,
+                lr_scheduler,
+                mode="train",
+            )
+            model.eval()
+            print(f"Start Query Epoch evaluation {epoch}/{query_epoch}")
+            loss = run_epoch(
+                dataset_range(10 ** (epoch - 1), 10 ** epoch, batch_size, 0.2, x_items=query_x_range, y_items=query_y_range),
+                model,
+                SimpleLossCompute(model.generator, criterion),
+                DummyOptimizer(),
+                DummyScheduler(),
+                mode="eval",
+            )[0]
+            print(f"Query Epoch {epoch}/{query_epoch}'s evaluation loss ${loss}")
+            model_path = os.path.join(folder, f"{epoch}-{query_epoch}-query.pt")
+            save_model(model, model_path)
+            if loss < best_loss:
+                best_loss = loss
+                best_path = model_path
 
     load_model(model, best_path)
     shutil.copyfile(best_path, os.path.join(folder, 'best.pt'))
